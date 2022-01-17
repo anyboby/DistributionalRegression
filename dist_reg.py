@@ -237,8 +237,8 @@ class Net(nn.Module):
         return ev_loss
 
     def reparametrize(self, mu, counts):
-        std_hat = torch.std(mu, dim=-1)[...,None]
-        std_pseudo = torch.exp(- .5 * counts) * std_hat.detach()
+        # std_hat = torch.std(mu, dim=-1)[...,None]
+        std_pseudo = torch.exp(- .5 * counts) #* std_hat.detach()
         eps = torch.randn_like(std_pseudo)
         # mu = mu * (1+torch.randn_like(std))
         return mu + eps * std_pseudo
@@ -369,11 +369,11 @@ def eval_and_plot_net(models, flush=True):
 ### MODEL
 torch.manual_seed(1)
 
-n_outs = 50
+n_outs = 5
 models = []
 
-loss_type = "quantile"
-ensemble_size = 5
+loss_type = "evidential"
+ensemble_size = 1
 for i in range(ensemble_size):
     net = Net(n_in=1, n_outs= n_outs, n_hidden=200, n_layers=2, lr=1e-4, weight_decay=0, loss_type=loss_type, last_layer_rbf=True).cuda()
     net.apply(init_weights_xav)
@@ -395,4 +395,4 @@ for i in range(epochs):
         #print('Epoch %4d, Train loss projection = %6.3f, loss quantile = %6.3f, loss evidential = %6.3f' % \
         #    (i, proj_loss.cpu().data.numpy(), qreg_loss.cpu().data.numpy(), evid_loss.cpu().data.numpy())
         #    )
-plt.savefig(f'quant_reg_{loss_type}_ens.pdf', bbox_inches = 'tight')
+plt.savefig(f'quant_reg_{loss_type}_q5.pdf', bbox_inches = 'tight')
