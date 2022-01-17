@@ -379,8 +379,8 @@ for i in range(ensemble_size):
     net.apply(init_weights_xav)
     models.append(net)
 
-bs = 128
-epochs = 30000
+bs = 256
+epochs = 50000
 
 for i in range(epochs):
     losses = []
@@ -395,4 +395,4 @@ for i in range(epochs):
         #print('Epoch %4d, Train loss projection = %6.3f, loss quantile = %6.3f, loss evidential = %6.3f' % \
         #    (i, proj_loss.cpu().data.numpy(), qreg_loss.cpu().data.numpy(), evid_loss.cpu().data.numpy())
         #    )
-plt.savefig(f'quant_reg_{loss_type}.pdf', bbox_inches = 'tight')
+plt.savefig(f'quant_reg_{loss_type}_ens.pdf', bbox_inches = 'tight')
