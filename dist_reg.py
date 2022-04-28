@@ -64,7 +64,15 @@ class Net(nn.Module):
             # quantile regression loss type
             self.loss = self.quant_loss
 
-            taus = np.arange(n_outs) / (n_outs-1)
+            taus = (np.arange(n_outs)+0.5)/n_outs
+            self.taus, = to_variable(var=(taus,), cuda=True)
+            self.layers.append(nn.Linear(n_hidden, self.n_outs))
+        
+        if loss_type == "implicit_quantile":
+            # quantile regression loss type
+            self.loss = self.impl_quant_loss
+
+            taus = (np.arange(n_outs)+0.5)/n_outs
             self.taus, = to_variable(var=(taus,), cuda=True)
             self.layers.append(nn.Linear(n_hidden, self.n_outs))
 
@@ -107,7 +115,7 @@ class Net(nn.Module):
         elif loss_type == "mse":
             self.loss = mse_loss
             self.layers.append(nn.Linear(n_hidden, self.n_outs))
-            
+            self.zs
         self.optimizer = torch.optim.Adam(self.parameters(), lr=lr, weight_decay=weight_decay)
         self.activation = F.silu
 
@@ -131,17 +139,18 @@ class Net(nn.Module):
                 x = self.reparametrize(mu, counts), mu, counts
             else: 
                 x = mu, mu, counts
-
         return x
     
     def forward_sample(self, x, size=1, include_latent = False, reparametrize=False):
         x = self.forward(x, reparametrize=reparametrize)
     
-        if self.loss_type == "quantile":
+        if self.loss_type == "quantile" or self.loss_type == "implicit_quantile":
             quant_idx = torch.randint(low=0, high=self.n_outs, size=(x.shape[0],size))
             x_idx = torch.arange(0, len(x))[...,None]
-
-            samples = x[x_idx, quant_idx]
+            if reparametrize:
+                samples = x[x_idx, quant_idx]
+            else:
+                samples = x.mean(dim=-1, keepdim=True).expand((quant_idx.shape))
 
         elif self.loss_type == "projection":
             probs = self.softmax(x)
@@ -151,6 +160,12 @@ class Net(nn.Module):
             unif_samples = self.unif.sample((x.shape[0],size))
 
             samples = self.v_min + self.delta_z * idx_samples + unif_samples
+
+            if reparametrize:
+                samples = samples
+            else:
+                samples = torch.sum(probs * self.zs.expand(probs.shape), dim=-1, keepdim=True)
+                samples = samples.expand((samples.shape[0], size))
 
         elif self.loss_type == "evidential":
             x, mu, counts = x
@@ -189,7 +204,7 @@ class Net(nn.Module):
     def rho_tau(self, u, tau, kappa=1):
         delta = (u < 0).float()
         if kappa == 0:
-            return (tau - delta) * u
+            return (tau - delta) * u 
         else:
             return abs(tau - delta) * self.hl(u=u, kappa=kappa)
 
@@ -215,6 +230,22 @@ class Net(nn.Module):
             loss = self.rho_tau(targets - thetas, self.taus, kappa = 0.0) # / std
         
         return loss
+
+    def impl_quant_loss(self, outs, targets, reduce=True):
+        thetas = outs
+        thetas = torch.sort(thetas, descending=False, dim=-1)[0]
+        # std = torch.std(thetas, dim = -1)[...,None].detach()
+
+        if reduce:
+            loss = torch.mean(
+                self.rho_tau(targets - thetas, self.taus, kappa = 0.0) #/ std
+                )
+        else:
+            loss = self.rho_tau(targets - thetas, self.taus, kappa = 0.0) # / std
+        
+        # loss += -torch.clip(torch.mean(torch.sum(thetas * torch.log(self.taus+0.01), dim=-1)),0, 0.5)
+        return loss
+
 
     def proj_loss(self, outs, targets):
         p_zs = outs
@@ -245,11 +276,11 @@ class Net(nn.Module):
 
 ### TRAINING DATA ###
 ### more complex mixture samples
-train_size = 10000
+train_size = 25000
 
 # generate xs
-x_clusters = torch.tensor([-25, 0, 35]).float()
-x_stds = torch.tensor([1.5,2.5, 2.5]).float()
+x_clusters = torch.tensor([-6, 0.2, 7]).float()
+x_stds = torch.tensor([0.5,0.5, 0.5]).float()
 mix = D.Categorical(torch.ones_like(x_clusters))
 comp = D.Normal(x_clusters, x_stds)
 gmm = MixtureSameFamily(mix, comp)
@@ -262,7 +293,9 @@ def f_mu_1(x, scale=1):
     res = scale * torch.sin(2 * x) * torch.cos(x / 2)
     return res
 def f_sig_1(x, scale=1e-1):
-    res = scale * (.5 * torch.sin(x) + 1) + 3.5 * torch.exp( - (x-35)**2 / 2)
+    # res = scale * (.5 * torch.sin(x) + 1) + 3.5 * torch.exp( - (x-35)**2 / 2)
+    res = ((torch.abs(x)+0.1) * scale)
+    # res = torch.ones_like(x) * scale
     return res
 
 def f_mu_2(x, scale=1):
@@ -273,15 +306,18 @@ def f_sig_2(x, scale=1e-1):                     ## add a high noise cluster for 
     return res
 
 ## define mixture components. Stds in x-direct are kept small. 
-mu_x1 = f_mu_1(x_samples, scale=2.5)
+mu_x1 = f_mu_1(x_samples, scale=0.7)
 mu_x1 = torch.cat((x_samples, mu_x1), dim = -1)
-sig_x1 = f_sig_1(x_samples, scale=1.5e-1)
-sig_x1 = torch.cat((1e-5 * torch.ones_like(x_samples), sig_x1), dim = -1)
+sig_x1 = f_sig_1(x_samples, scale=0.3e-1)
+# sig_x1 = torch.cat((1e-5 * torch.ones_like(x_samples), sig_x1), dim = -1)
+sig_x1 = torch.cat((sig_x1, sig_x1), dim = -1)
 
-mu_x2 = f_mu_2(x_samples, scale=2.5)
+mu_x2 = f_mu_2(x_samples, scale=0.7)
 mu_x2 = torch.cat((x_samples, mu_x2), dim = -1)
-sig_x2 = f_sig_2(x_samples, scale=3.5e-1)
+sig_x2 = f_sig_2(x_samples, scale=0.5e-1)
 sig_x2 = torch.cat((1e-5 * torch.ones_like(x_samples), sig_x2), dim = -1)
+
+sig_x2, mu_x2 = sig_x1, mu_x1
 
 mu_mix = torch.cat((mu_x1, mu_x2), dim = 0)
 sig_mix = torch.cat((sig_x1, sig_x2), dim = 0)
@@ -299,8 +335,9 @@ plt.ion()
 
 ### PREDICTION / EVALUATION
 # create test values of x
-x_test = torch.linspace(-65, 65, steps=500)[...,None].float().cuda()
+x_test = torch.linspace(-17, 23, steps=1000)[...,None].float().cuda()
 sample_size = 100
+old_y_pred_vars1 = np.squeeze(np.zeros_like(x_test.cpu().detach().numpy()))
 
 # draw samples from CDF by drawing from CDF^-1(u), u ~ U[0,1]
 x_samples = x_test.repeat((1,sample_size)).flatten().cpu().detach().numpy()
@@ -311,45 +348,57 @@ plt.style.use('default')
 
 # training data plot
 samples_np = samples.cpu().detach().numpy()
-plt.scatter(samples_np[:,0], samples_np[:,1], s = 10, marker = 'x', color = 'green', alpha = 0.5, label='data')
 
 # eval plot placeholders
 x_test_np = x_test.cpu().detach().numpy()
-ep_plt = plt.plot(x_test_np, np.zeros_like(x_test_np), color='red')[0]
-map_sc = plt.scatter(x_samples, np.zeros_like(x_samples), color='orange', s=2, alpha=.2,)
-postpred_sc = plt.scatter(x_samples, np.zeros_like(x_samples), color='purple', s=1, alpha=.1,)
+# ep_plt1 = plt.plot(x_test_np, np.zeros_like(x_test_np), color='orange')[0]
+# ep_plt2 = plt.plot(x_test_np, np.zeros_like(x_test_np), color='yellow')[0]
+
+plt.scatter(samples_np[:,0], samples_np[:,1], s = 25, marker = 'x', color = 'green', alpha = 1, label='data')
+postpred_sc = plt.scatter(x_samples, np.zeros_like(x_samples), color='purple', s=1, alpha=.08,)
+postpred_sc2 = plt.scatter(x_samples, np.zeros_like(x_samples), color='red', s=1, alpha=.08,)
+map_sc = plt.scatter(x_samples, np.zeros_like(x_samples), color='purple', s=1, alpha=.3,)
+map_sc2 = plt.scatter(x_samples, np.zeros_like(x_samples), color='red', s=1, alpha=.3,)
 
 y_lim = (-5,5)
-plt.xlim([-65, 65])
+plt.xlim([-17, 23])
 plt.ylim(y_lim)
 
 plt.show()
 
-def eval_and_plot_net(models, flush=True):
+def eval_and_plot_net(models, mapscatter, postpredscatter, flush=True):
 
     y_pred_maps, y_pred_postpreds, quant_vars = [], [], []
     max_count = 0
 
     for i in range(len(models)):
         cur_model = models[i]
-        y_pred_maps.append(cur_model.forward_sample(x_test, size=sample_size, reparametrize=False).flatten().cpu().detach().numpy())
-        y_pred_postpreds.append(cur_model.forward_sample(x_test, size=sample_size, reparametrize=True).flatten().cpu().detach().numpy())
+        y_pred_map = cur_model.forward_sample(x_test, size=sample_size, reparametrize=False)
+        y_pred_postpred = cur_model.forward_sample(x_test, size=sample_size, reparametrize=True)
+
+        y_pred_maps.append(y_pred_map.flatten().cpu().detach().numpy())
+        y_pred_postpreds.append(y_pred_postpred.flatten().cpu().detach().numpy())
 
         # epistemic uncertainty
         if models[0].loss_type == "evidential":
             _, _, quant_var  = models[i].forward_sample(x_test, size=sample_size, include_latent=True)
             quant_var = torch.mean(quant_var, dim= -1).cpu().detach().numpy()
             quant_vars.append(quant_var)
+        else: 
+            quant_var = torch.var(y_pred_postpred, dim=-1).cpu().detach().numpy()
+            quant_vars.append(quant_var)
 
     if models[0].loss_type == "evidential":
         quant_var_pl = np.mean(quant_vars, axis=0)
     else:
-        quant_var_pl = np.var(y_pred_maps, axis=0)
-        quant_var_pl = np.reshape(quant_var_pl, (len(x_test_np), sample_size))
-        quant_var_pl = 1/np.mean(quant_var_pl, axis=-1)
-    
+        # quant_var_pl = np.var(y_pred_maps, axis=0)
+        # quant_var_pl = np.reshape(quant_var_pl, (len(x_test_np), sample_size))
+        # quant_var_pl = 1/np.mean(quant_var_pl, axis=-1)
+
+        qaunt_var_this_step = np.mean(quant_vars, axis=0)
+        quant_var_pl = np.abs(qaunt_var_this_step-old_y_pred_vars1)
     # fit to plot size
-    quant_var_pl = quant_var_pl / max(quant_var_pl[100:400]) * y_lim[-1]
+    quant_var_pl = quant_var_pl #/ 3 * np.median(quant_var_pl) * y_lim[-1]
 
     y_pred_map_pl = np.mean(y_pred_maps, axis=0 )
     y_pred_postpred_pl = y_pred_postpreds[randint(0,len(models)-1)]
@@ -357,30 +406,41 @@ def eval_and_plot_net(models, flush=True):
     print(f"max count :{max_count}")
 
     # update prediction plots    
-    ep_plt.set_ydata(quant_var_pl)
-    map_sc.set_offsets(np.stack((x_samples,y_pred_map_pl), axis=-1))
-    postpred_sc.set_offsets(np.stack((x_samples,y_pred_postpred_pl), axis=-1))
-
+    # ep_plt.set_ydata(quant_var_pl)
+    mapscatter.set_offsets(np.stack((x_samples,y_pred_map_pl), axis=-1))
+    postpredscatter.set_offsets(np.stack((x_samples,y_pred_postpred_pl), axis=-1))
+    
     fig.canvas.draw()
     if flush:
         fig.canvas.flush_events()
+
+    return qaunt_var_this_step
+
 
 
 ### MODEL
 torch.manual_seed(1)
 
-n_outs = 5
+n_outs = 400
 models = []
-
-loss_type = "evidential"
+models2 = []
+loss_type = "implicit_quantile"
 ensemble_size = 1
 for i in range(ensemble_size):
-    net = Net(n_in=1, n_outs= n_outs, n_hidden=200, n_layers=2, lr=1e-4, weight_decay=0, loss_type=loss_type, last_layer_rbf=True).cuda()
+    net = Net(n_in=1, n_outs= n_outs, n_hidden=128, n_layers=2, lr=5e-4, weight_decay=0, loss_type=loss_type, last_layer_rbf=False).cuda()
     net.apply(init_weights_xav)
     models.append(net)
 
-bs = 256
-epochs = 50000
+loss_type2 = "projection"
+ensemble_size2 = 1
+for i in range(ensemble_size2):
+    net = Net(n_in=1, n_outs= n_outs, n_hidden=128, n_layers=2, lr=5e-4, weight_decay=0, loss_type=loss_type2, last_layer_rbf=False, v_min=-3, v_max=3).cuda()
+    net.apply(init_weights_xav)
+    models2.append(net)
+
+
+bs = 64
+epochs = 100000
 
 for i in range(epochs):
     losses = []
@@ -388,10 +448,32 @@ for i in range(epochs):
         sub_idx = np.random.choice(np.arange(0, train_size), size=bs, replace=True)
         x_train, y_train = samples[sub_idx,0:1],samples[sub_idx,1:2]
         losses.append(models[m].fit(x_train, y_train))
+    
+    for m in range(len(models2)):
+        sub_idx = np.random.choice(np.arange(0, train_size), size=bs, replace=True)
+        # x_train = samples[sub_idx,0:1]
+        x_train, y_train = samples[sub_idx,0:1],samples[sub_idx,1:2]
 
-    if i % 500 == 0:
+        # sub_idx2 = np.random.choice(np.arange(0, len(x_train)), size=bs, replace=True)
+
+        # y_train = models[0].forward(x_train.to("cuda"))
+        # x_train = x_train.expand(y_train.shape)
+        # x_train, y_train = x_train.flatten().unsqueeze(-1), y_train.flatten().unsqueeze(-1)
+
+        # y_train2 = models[1].forward(x_train.to("cuda")).mean(dim=-1, keepdim=True)
+        # mus = (y_train1 + y_train2)/2
+        # vars = (y_train1 - mus)**2/2 + (y_train2 - mus)**2/2
+        # y_train = torch.normal(mus, torch.sqrt(vars))
+        # x_train2 = x_train.expand(y_train2.shape)
+        # x_train2, y_train2 = x_train2.flatten().unsqueeze(-1)[sub_idx2], y_train2.flatten().unsqueeze(-1)[sub_idx2]
+        # 
+        losses.append(models2[m].fit(x_train, y_train))
+
+
+    if i % 150 == 0:
         print(i, [l.cpu().data.numpy() for l in losses])
-        eval_and_plot_net(models)
+        eval_and_plot_net(models, map_sc, postpred_sc)
+        eval_and_plot_net(models2, map_sc2, postpred_sc2)
         #print('Epoch %4d, Train loss projection = %6.3f, loss quantile = %6.3f, loss evidential = %6.3f' % \
         #    (i, proj_loss.cpu().data.numpy(), qreg_loss.cpu().data.numpy(), evid_loss.cpu().data.numpy())
         #    )

@@ -12,11 +12,13 @@ def main():
     # Create some training and testing data
     x_train, y_train = my_data(-4, 4, 10000)
     x_test, y_test = my_data(-65, 65, 1000, train=False)
+    y_test_sorted = y_test[x_test.argsort(axis=0)]
+    x_test_sorted = np.sort(x_test, axis=0)
 
     # Define our model with an evidential output
     model = tf.keras.Sequential([
-        tf.keras.layers.Dense(200, activation="relu"),
-        tf.keras.layers.Dense(200, activation="relu"),
+        tf.keras.layers.Dense(200, activation="swish"),
+        tf.keras.layers.Dense(200, activation="swish"),
         edl.layers.DenseNormalGamma(1),
     ])
 
@@ -28,11 +30,11 @@ def main():
     model.compile(
         optimizer=tf.keras.optimizers.Adam(5e-4),
         loss=EvidentialRegressionLoss)
-    model.fit(x_train, y_train, batch_size=100, epochs=500)
+    model.fit(x_train, y_train, batch_size=1024, epochs=10000)
 
     # Predict and plot using the trained model
-    y_pred = model(x_test)
-    plot_predictions(x_train, y_train, x_test, y_test, y_pred)
+    y_pred = model(x_test_sorted)
+    plot_predictions(x_train, y_train, x_test_sorted, y_test_sorted, y_pred)
 
     # Done!!
 
@@ -100,31 +102,35 @@ def my_data(x_min, x_max, n, train=True):
 
     return x, y
 
-def plot_predictions(x_train, y_train, x_test, y_test, y_pred, n_stds=4, kk=0):
+def plot_predictions(x_train, y_train, x_test, y_test, y_pred, n_stds=2, kk=0):
     x_test = x_test[:, 0]
     mu, v, alpha, beta = tf.split(y_pred, 4, axis=-1)
     mu = mu[:, 0]
-    var = np.sqrt(beta / (v * (alpha - 1)))
-    var = np.minimum(var, 1e3)[:, 0]  # for visualization
+    std_mu = np.sqrt(beta / (v * (alpha - 1)))     # note: this is std[mu], so it's epistemic 
+    std_mu = np.minimum(std_mu, 1e3)[:, 0]  # for visualization
+    std_y = np.sqrt(beta/(alpha-1))   # this is al. unc.
+    std_y = np.minimum(std_y, 1e3)[:, 0]
 
     plt.figure(figsize=(5, 3), dpi=200)
-    plt.scatter(x_train, y_train, s=1., c='#463c3c', zorder=0, label="Train")
-    plt.scatter(x_test, y_test, s=1., color='red', zorder=2, label="Test")
-    plt.scatter(x_test, mu, s=1., color='#007cab', zorder=3, label="Pred")
+    plt.scatter(x_train, y_train, s=.2, c='#463c3c', zorder=0, label="Train")
+    plt.scatter(x_test, y_test, s=.2, color='red', zorder=2, label="Test")
+    plt.scatter(x_test, mu, s=.2, color='#007cab', zorder=3, label="Pred")
+    plt.plot(x_test, std_y, color="purple", zorder=4, label="V_y(x) - Al. Unc.")
     # plt.plot([-4, -4], [-150, 150], 'k--', alpha=0.4, zorder=0)
     # plt.plot([+4, +4], [-150, 150], 'k--', alpha=0.4, zorder=0)
     for k in np.linspace(0, n_stds, 4):
         plt.fill_between(
-            x_test, (mu - k * var), (mu + k * var),
+            x_test, (mu - k * std_mu), (mu + k * std_mu),
             alpha=0.3,
             edgecolor=None,
             facecolor='#00aeef',
             linewidth=0,
             zorder=1,
-            label="Unc." if k == 0 else None)
+            label="V(mu) - Ep. Unc." if k == 0 else None)
     plt.gca().set_ylim(-5, 5)
     plt.gca().set_xlim(-65, 65)
-    plt.legend(loc="upper left")
+    plt.legend(loc="upper left", prop={'size':6})
+    plt.savefig(f'evidential_reg.pdf', bbox_inches = 'tight')
     plt.show()
 
 
