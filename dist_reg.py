@@ -110,14 +110,15 @@ class Net(nn.Module):
                 #RBF activation before last layer
                 self.counts_activation = count_act
             else:
-                self.counts_activation = F.silu
+                self.counts_activation = F.relu
 
         elif loss_type == "mse":
             self.loss = mse_loss
             self.layers.append(nn.Linear(n_hidden, self.n_outs))
             self.zs
         self.optimizer = torch.optim.Adam(self.parameters(), lr=lr, weight_decay=weight_decay)
-        self.activation = F.silu
+        # self.activation = F.relu
+        self.activation = F.relu
 
     def forward(self, x, reparametrize = True):
         for l in range(len(self.layers)-1):
@@ -276,22 +277,39 @@ class Net(nn.Module):
 
 ### TRAINING DATA ###
 ### more complex mixture samples
-train_size = 500
+train_size = 5000
 
 # generate xs
 # x_clusters = torch.tensor([-6, 0.2, 7]).float()
-x_clusters = torch.tensor([0, 0, 0]).float()
+x_clusters = torch.tensor([-2.5, 0, 2.5]).float()
 # x_stds = torch.tensor([0.5,0.5, 0.5]).float()
-x_stds = torch.tensor([1,1,1]).float()
+x_stds = torch.tensor([.2,1.5,.2]).float()
 
 mix = D.Categorical(torch.ones_like(x_clusters))
 comp = D.Normal(x_clusters, x_stds)
 gmm = MixtureSameFamily(mix, comp)
-
 x_samples = gmm.sample(sample_shape=(train_size,1))
+
+
+x_interval = [-3,3]
+uni = D.Uniform(x_interval[0], x_interval[1])
+x_samples = uni.sample(sample_shape=(train_size,1))
 
 # model repose samples
 # define mean and std functions
+def f_lin_1(x, scale=1):
+    res = scale * x
+    return res
+
+def f_sin_1(x, scale=1):
+    res = torch.sin(scale*x)
+    return res
+
+
+def f_const_1(x, scale=1):
+    res = torch.ones_like(x) * scale
+    return res
+
 def f_mu_1(x, scale=1):
     res = scale * torch.sin(x) * torch.cos(x / 2)
     return res
@@ -311,10 +329,10 @@ def f_sig_2(x, scale=1e-1):                     ## add a high noise cluster for 
 
 ## define mixture components. Stds in x-direct are kept small. 
 # mu_x1 = f_mu_1(x_samples, scale=0.6)
-mu_x1 = f_mu_1(x_samples, scale=0.4)
+mu_x1 = f_sin_1(x_samples, scale=0.8)
 mu_x1 = torch.cat((x_samples, mu_x1), dim = -1)
 # sig_x1 = f_sig_1(x_samples, scale=0.2e-1)
-sig_x1 = f_sig_1(x_samples, scale=0.8e-1)
+sig_x1 = f_const_1(x_samples, scale=0.1)
 # sig_x1 = torch.cat((1e-5 * torch.ones_like(x_samples), sig_x1), dim = -1)
 sig_x1 = torch.cat((sig_x1, sig_x1), dim = -1)
 
@@ -341,8 +359,8 @@ plt.ion()
 
 ### PREDICTION / EVALUATION
 # create test values of x
-x_test = torch.linspace(-17, 23, steps=1000)[...,None].float().cuda()
-sample_size = 100
+x_test = torch.linspace(-8, 8, steps=2000)[...,None].float().cuda()
+sample_size = 200
 old_y_pred_vars1 = np.squeeze(np.zeros_like(x_test.cpu().detach().numpy()))
 
 # draw samples from CDF by drawing from CDF^-1(u), u ~ U[0,1]
@@ -360,23 +378,29 @@ x_test_np = x_test.cpu().detach().numpy()
 # ep_plt1 = plt.plot(x_test_np, np.zeros_like(x_test_np), color='orange')[0]
 # ep_plt2 = plt.plot(x_test_np, np.zeros_like(x_test_np), color='yellow')[0]
 
-postpred_sc = plt.scatter(x_samples, np.zeros_like(x_samples), color='purple', s=1, alpha=.04,)
-postpred_sc2 = plt.scatter(x_samples, np.zeros_like(x_samples), color='blue', s=1, alpha=.04,)
-postpred_sc3 = plt.scatter(x_samples, np.zeros_like(x_samples), color='orange', s=1, alpha=.04,)
-postpred_sc4 = plt.scatter(x_samples, np.zeros_like(x_samples), color='red', s=1, alpha=.04,)
+postpred_sc = plt.scatter(x_samples, np.zeros_like(x_samples), color='purple', s=1, alpha=.02, label="QR1")
+postpred_sc2 = plt.scatter(x_samples, np.zeros_like(x_samples), color='blue', s=1, alpha=.01, label="QR2")
+postpred_sc3 = plt.scatter(x_samples, np.zeros_like(x_samples), color='orange', s=1, alpha=.02, label="CDR1")
+postpred_sc4 = plt.scatter(x_samples, np.zeros_like(x_samples), color='red', s=1, alpha=.01, label="CDR2")
 
 map_sc = plt.scatter(x_samples, np.zeros_like(x_samples), color='purple', s=1, alpha=.1,)
 map_sc2 = plt.scatter(x_samples, np.zeros_like(x_samples), color='blue', s=1, alpha=.1,)
 map_sc3 = plt.scatter(x_samples, np.zeros_like(x_samples), color='orange', s=1, alpha=.1,)
 map_sc4 = plt.scatter(x_samples, np.zeros_like(x_samples), color='red', s=1, alpha=.1,)
 
-plt.scatter(samples_np[:,0], samples_np[:,1], s = 25, marker = 'x', color = 'green', alpha = 1, label='data')
+sc = plt.scatter(samples_np[:,0], samples_np[:,1], s = 10, color = 'green', alpha = 0.2, label='Data')
 
 
-y_lim = (-5,5)
-plt.xlim([-17, 23])
+y_lim = (-3,3)
+plt.xlim([-8, 8])
 plt.ylim(y_lim)
+leg = plt.legend(loc=3, prop={'size': 18})
+for lh in leg.legendHandles: 
+    lh.set_alpha(1)
+    lh._sizes = [100]
 
+
+# plt.legend(loc=2, prop={'size': 12, alpha=1})
 plt.show()
 
 def eval_and_plot_net(models, mapscatter, postpredscatter, flush=True):
@@ -434,7 +458,7 @@ def eval_and_plot_net(models, mapscatter, postpredscatter, flush=True):
 ### MODEL
 torch.manual_seed(1)
 
-n_outs = 200
+n_outs = 201
 models = []
 models2 = []
 models3 = []
@@ -442,50 +466,54 @@ models4 = []
 loss_type = "implicit_quantile"
 ensemble_size = 1
 for i in range(ensemble_size):
-    net = Net(n_in=1, n_outs= n_outs, n_hidden=128, n_layers=2, lr=5e-4, weight_decay=0, loss_type=loss_type, last_layer_rbf=False).cuda()
+    net = Net(n_in=1, n_outs= n_outs, n_hidden=512, n_layers=1, lr=1e-4, weight_decay=0, loss_type=loss_type, last_layer_rbf=False).cuda()
     net.apply(init_weights_xav)
     models.append(net)
 
 ensemble_size2 = 1
 for i in range(ensemble_size2):
-    net = Net(n_in=1, n_outs= n_outs, n_hidden=128, n_layers=2, lr=5e-4, weight_decay=0, loss_type=loss_type, last_layer_rbf=False).cuda()
+    net = Net(n_in=1, n_outs= n_outs, n_hidden=512, n_layers=1, lr=1e-4, weight_decay=0, loss_type=loss_type, last_layer_rbf=False).cuda()
     net.apply(init_weights_xav)
     models2.append(net)
 
 loss_type2 = "projection"
 ensemble_size3 = 1
 for i in range(ensemble_size):
-    net = Net(n_in=1, n_outs= n_outs, n_hidden=128, n_layers=2, lr=5e-4, weight_decay=0, loss_type=loss_type2, last_layer_rbf=False, v_min=-3, v_max=3).cuda()
+    net = Net(n_in=1, n_outs= n_outs, n_hidden=512, n_layers=1, lr=1e-4, weight_decay=0, loss_type=loss_type2, last_layer_rbf=False, v_min=-3, v_max=3).cuda()
     net.apply(init_weights_xav)
     models3.append(net)
 
 ensemble_size4 = 1
 for i in range(ensemble_size2):
-    net = Net(n_in=1, n_outs= n_outs, n_hidden=128, n_layers=2, lr=5e-4, weight_decay=0, loss_type=loss_type2, last_layer_rbf=False, v_min=-3, v_max=3).cuda()
+    net = Net(n_in=1, n_outs= n_outs, n_hidden=512, n_layers=1, lr=1e-4, weight_decay=0, loss_type=loss_type2, last_layer_rbf=False, v_min=-3, v_max=3).cuda()
     net.apply(init_weights_xav)
     models4.append(net)
 
 
-bs = 64
-epochs = 100000
+bs = 5000
+epochs = 20000
 
 for i in range(epochs):
     losses = []
     for m in range(len(models)):
-        sub_idx = np.random.choice(np.arange(0, train_size), size=bs, replace=True)
-        x_train, y_train = samples[sub_idx,0:1],samples[sub_idx,1:2]
+        # sub_idx = np.random.choice(np.arange(0, train_size), size=bs, replace=True)
+        # x_train, y_train = samples[sub_idx,0:1],samples[sub_idx,1:2]
+        x_train, y_train = samples[:,0:1],samples[:,1:2]
         losses.append(models[m].fit(x_train, y_train))
     for m in range(len(models2)):
-        sub_idx = np.random.choice(np.arange(0, train_size), size=bs, replace=True)
-        x_train, y_train = samples[sub_idx,0:1],samples[sub_idx,1:2]
+        # sub_idx = np.random.choice(np.arange(0, train_size), size=bs, replace=True)
+        # x_train, y_train = samples[sub_idx,0:1],samples[sub_idx,1:2]
+        x_train, y_train = samples[:,0:1],samples[:,1:2]
         losses.append(models2[m].fit(x_train, y_train))
     for m in range(len(models3)):
-        sub_idx = np.random.choice(np.arange(0, train_size), size=bs, replace=True)
-        x_train, y_train = samples[sub_idx,0:1],samples[sub_idx,1:2]
+        # sub_idx = np.random.choice(np.arange(0, train_size), size=bs, replace=True)
+        # x_train, y_train = samples[sub_idx,0:1],samples[sub_idx,1:2]
+        x_train, y_train = samples[:,0:1],samples[:,1:2]
         losses.append(models3[m].fit(x_train, y_train))
     for m in range(len(models4)):
-        sub_idx = np.random.choice(np.arange(0, train_size), size=bs, replace=True)
-        x_train, y_train = samples[sub_idx,0:1],samples[sub_idx,1:2]
+        # sub_idx = np.random.choice(np.arange(0, train_size), size=bs, replace=True)
+        # x_train, y_train = samples[sub_idx,0:1],samples[sub_idx,1:2]
+        x_train, y_train = samples[:,0:1],samples[:,1:2]
         losses.append(models4[m].fit(x_train, y_train))
 
 
@@ -510,13 +538,16 @@ for i in range(epochs):
     #     losses.append(models2[m].fit(x_train, y_train))
 
 
-    if i % 15 == 0:
+    if i % 2000 == 0 or i==epochs-1:
+        flush = i<epochs-1
         print(i, [l.cpu().data.numpy() for l in losses])
-        eval_and_plot_net(models, map_sc, postpred_sc)
-        eval_and_plot_net(models2, map_sc2, postpred_sc2)
-        eval_and_plot_net(models3, map_sc3, postpred_sc3)
-        eval_and_plot_net(models4, map_sc4, postpred_sc4)
+        eval_and_plot_net(models, map_sc, postpred_sc, flush = flush)
+        eval_and_plot_net(models2, map_sc2, postpred_sc2, flush = flush)
+        eval_and_plot_net(models3, map_sc3, postpred_sc3, flush = flush) 
+        eval_and_plot_net(models4, map_sc4, postpred_sc4, flush = flush)
         #print('Epoch %4d, Train loss projection = %6.3f, loss quantile = %6.3f, loss evidential = %6.3f' % \
         #    (i, proj_loss.cpu().data.numpy(), qreg_loss.cpu().data.numpy(), evid_loss.cpu().data.numpy())
         #    )
-plt.savefig(f'quant_reg_{loss_type}_q5.pdf', bbox_inches = 'tight')
+plt.savefig(f'quant_reg_{loss_type}.pdf', bbox_inches = 'tight')
+# plt.savefig(f'quant_reg_{loss_type}.eps', bbox_inches = 'tight', format="eps")
+plt.savefig(f'quant_reg_{loss_type}.png', dpi=300)
