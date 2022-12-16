@@ -295,196 +295,129 @@ class Net(nn.Module):
 
 ### TRAINING DATA ###
 ### more complex mixture samples
-train_size = 1500
+n_dim = 24
+train_size = 250000
 
 # generate xs
-x_clusters = torch.tensor([-3.5, 0.0, 4.5]).float()
-x_stds = torch.tensor([0.3, 0.3, 1.5]).float()
-mix = D.Categorical(torch.ones_like(x_clusters))
-comp = D.Normal(x_clusters, x_stds)
-gmm = MixtureSameFamily(mix, comp)
-
-x_samples = gmm.sample(sample_shape=(train_size,1))
-
-# model repose samples
-# define mean and std functions
-def f_mu_1(x, scale=1):
-    # res = scale * torch.sin(x/1.5) * torch.cos(x / 2)
-    res = np.sin(scale * x)
-    return res
-def f_sig_1(x, scale=1e-1):
-    # res = scale * (.5 * torch.sin(x) + 1) + 3.5 * torch.exp( - (x-35)**2 / 2)
-    res = ((torch.abs(x)+0.1) * scale)
-    # res = torch.ones_like(x) * scale
-    return res
-
-def f_mu_2(x, scale=1):
-    res = scale * torch.cos(x_samples) * torch.sin(x_samples / 2 + 2)
-    return res
-def f_sig_2(x, scale=1e-1):                     ## add a high noise cluster for evaluation
-    res = scale * (.5 * torch.cos(x) + 1) + 3.5 * torch.exp( - (x-35)**2 / 2)
-    return res
-
-## define mixture components. Stds in x-direct are kept small. 
-mu_x1 = 0.25 * f_mu_1(x_samples, scale=2)
-sig_x1 = torch.ones_like(mu_x1)/15
-# mu_x1 = torch.zeros_like(mu_x1)
-mu_x1 = torch.cat((x_samples, mu_x1), dim = -1)
-# sig_x1 = f_sig_1(x_samples, scale=0.3e-1)
-# sig_x1 = torch.cat((1e-5 * torch.ones_like(x_samples), sig_x1), dim = -1)
-sig_x1 = torch.cat((sig_x1, sig_x1), dim = -1)
-
-mu_x2 = f_mu_2(x_samples, scale=0.7)
-mu_x2 = torch.cat((x_samples, mu_x2), dim = -1)
-sig_x2 = f_sig_2(x_samples, scale=0.5e-1)
-sig_x2 = torch.cat((1e-5 * torch.ones_like(x_samples), sig_x2), dim = -1)
-
-sig_x2, mu_x2 = sig_x1, mu_x1
-
-mu_mix = torch.cat((mu_x1, mu_x2), dim = 0)
-sig_mix = torch.cat((sig_x1, sig_x2), dim = 0)
-
-mix_y = D.Categorical(torch.ones(2 * train_size,))
-comps_y = D.Independent(D.Normal(
-    loc = mu_mix, scale = sig_mix), 1)
-gmm_y = MixtureSameFamily(mix_y, comps_y)
-
-samples = gmm_y.sample(sample_shape=(train_size,))
-# samples[...,1] = torch.zeros_like(samples[...,1]) #<---- for zeros
-
-### LIVE PLOTTING
-plt.ion()
-
-### PREDICTION / EVALUATION
-# create test values of x
-x_test = torch.linspace(-10, 10, steps=500)[...,None].float().cuda()
-sample_size = 100
-old_y_pred_vars1 = np.squeeze(np.zeros_like(x_test.cpu().detach().numpy()))
-
-# draw samples from CDF by drawing from CDF^-1(u), u ~ U[0,1]
-x_samples = x_test.repeat((1,sample_size)).flatten().cpu().detach().numpy()
-
-# plot settings
-fig = plt.figure(figsize = (4, 3))
-plt.style.use('default')
-
-# training data plot
-samples_np = samples.cpu().detach().numpy()
-
-# eval plot placeholders
-x_test_np = x_test.cpu().detach().numpy()
-# ep_plt1 = plt.plot(x_test_np, np.zeros_like(x_test_np), color='orange')[0]
-# ep_plt2 = plt.plot(x_test_np, np.zeros_like(x_test_np), color='yellow')[0]
-
-plt.scatter(samples_np[:,0], samples_np[:,1], s = 25, marker = 'x', color = 'green', alpha = 1, label='data')
-postpred_sc = plt.scatter(x_samples, np.zeros_like(x_samples), color='purple', s=2, alpha=.08, label="quantile regression")
-postpred_sc2 = plt.scatter(x_samples, np.zeros_like(x_samples), color='red', s=2, alpha=.08, label="discrete distribution")
-map_sc = plt.scatter(x_samples, np.zeros_like(x_samples), color='purple', s=2, alpha=.3,)
-map_sc2 = plt.scatter(x_samples, np.zeros_like(x_samples), color='red', s=2, alpha=.3,)
-
-y_lim = (-5,5)
-plt.xlim([-12, 12])
-plt.ylim(y_lim)
-
-plt.show()
-
-def eval_and_plot_net(models, mapscatter, postpredscatter, flush=True, scale=1):
-
-    y_pred_maps, y_pred_postpreds, quant_vars = [], [], []
-    max_count = 0
-
-    for i in range(len(models)):
-        cur_model = models[i]
-        y_pred_map = cur_model.forward_sample(x_test, size=sample_size, reparametrize=False, logits=False)
-        y_pred_postpred = cur_model.forward_sample(x_test, size=sample_size, reparametrize=True, logits=False)
-
-        y_pred_maps.append(y_pred_map.flatten().cpu().detach().numpy())
-        y_pred_postpreds.append(y_pred_postpred.flatten().cpu().detach().numpy())
-
-        # epistemic uncertainty
-        if models[0].loss_type == "evidential":
-            _, _, quant_var  = models[i].forward_sample(x_test, size=sample_size, include_latent=True)
-            quant_var = torch.mean(quant_var, dim= -1).cpu().detach().numpy()
-            quant_vars.append(quant_var)
-        else: 
-            quant_var = torch.var(y_pred_postpred, dim=-1).cpu().detach().numpy()
-            quant_vars.append(quant_var)
-
-    if models[0].loss_type == "evidential":
-        quant_var_pl = np.mean(quant_vars, axis=0)
-    else:
-        # quant_var_pl = np.var(y_pred_maps, axis=0)
-        # quant_var_pl = np.reshape(quant_var_pl, (len(x_test_np), sample_size))
-        # quant_var_pl = 1/np.mean(quant_var_pl, axis=-1)
-
-        qaunt_var_this_step = np.mean(quant_vars, axis=0)
-        quant_var_pl = np.abs(qaunt_var_this_step-old_y_pred_vars1)
-    # fit to plot size
-    quant_var_pl = quant_var_pl #/ 3 * np.median(quant_var_pl) * y_lim[-1]
-
-    y_pred_map_pl = np.mean(y_pred_maps, axis=0 )
-    y_pred_postpred_pl = y_pred_postpreds[randint(0,len(models)-1)]
-
-    print(f"max count :{max_count}")
-
-    # update prediction plots    
-    # ep_plt.set_ydata(quant_var_pl)
-    mapscatter.set_offsets(np.stack((x_samples,scale*y_pred_map_pl), axis=-1))
-    postpredscatter.set_offsets(np.stack((x_samples,scale*y_pred_postpred_pl), axis=-1))
-    
-    fig.canvas.draw()
-    if flush:
-        fig.canvas.flush_events()
-
-    return qaunt_var_this_step
-
-
+x_train = torch.normal(mean=torch.zeros(size=(train_size, n_dim)), std=torch.ones(size=(train_size, n_dim)))
+x_train = x_train / torch.sqrt(torch.sum(x_train**2, dim=-1, keepdim=True))
+y_train = torch.ones(size=(train_size, 1))
 
 ### MODEL
 torch.manual_seed(1)
 
-n_outs = 100
+n_outs = 51
 models = []
-models2 = []
 loss_type = "quantile"
-ensemble_size = 1
+ensemble_size = 100
 for i in range(ensemble_size):
-    net = Net(n_in=1, n_outs= n_outs, n_hidden=128, n_layers=2, lr=1e-3, weight_decay=1e-9, loss_type=loss_type, last_layer_rbf=False).cuda()
+    net = Net(n_in=n_dim, n_outs= n_outs, n_hidden=512, n_layers=1, lr=5e-4, weight_decay=0, loss_type=loss_type, last_layer_rbf=False).cuda()
     net.apply(init_weights_xav)
     models.append(net)
 
-loss_type2 = "projection"
-ensemble_size2 = 1
-for i in range(ensemble_size2):
-    net = Net(n_in=1, n_outs= n_outs, n_hidden=128, n_layers=2, lr=1e-3, weight_decay=1e-9, loss_type=loss_type2, last_layer_rbf=False, v_min=-6, v_max=6).cuda()
-    net.apply(init_weights_xav)
-    models2.append(net)
-
-
 bs = 128
-epochs = 1000000
+epochs = 5000
 
 for i in range(epochs):
     losses = []
     for m in range(len(models)):
         sub_idx = np.random.choice(np.arange(0, train_size), size=bs, replace=True)
-        x_train, y_train = samples[sub_idx,0:1],samples[sub_idx,1:2]
-        losses.append(models[m].fit(x_train, y_train))
-    
-    for m in range(len(models2)):
-        sub_idx = np.random.choice(np.arange(0, train_size), size=bs, replace=True)
-        # x_train = samples[sub_idx,0:1]
-        x_train, y_train = samples[sub_idx,0:1],samples[sub_idx,1:2]
+        x_mb, y_mb = x_train[sub_idx],y_train[sub_idx]
+        losses.append(models[m].fit(x_mb, y_mb))
 
-        losses.append(models2[m].fit(x_train, y_train))
-
-    plt.legend(prop={'size': 14})
-    if i % 500 == 0:
+    if i % 100 == 0:
         print(i, [l.cpu().data.numpy() for l in losses])
-        eval_and_plot_net(models, map_sc, postpred_sc)
-        eval_and_plot_net(models2, map_sc2, postpred_sc2, scale=1)
-        # eval_and_plot_net(models2, map_sc2, postpred_sc2, scale=0.1)
-        #print('Epoch %4d, Train loss projection = %6.3f, loss quantile = %6.3f, loss evidential = %6.3f' % \
-        #    (i, proj_loss.cpu().data.numpy(), qreg_loss.cpu().data.numpy(), evid_loss.cpu().data.numpy())
-        #    )
-plt.savefig(f'quant_reg_{loss_type}_q5.pdf', bbox_inches = 'tight')
+
+### evaluation: searching for ensemble agreement on a wider hypersphere
+sweeps = 10000
+eval_size = 128
+
+test_r = 2.0 #radius of hypersphere
+
+## get reference var
+ref_var = 0
+for j in range(train_size//bs):
+    x_ref = x_train[j*bs:(j+1)*bs].to("cuda")
+    ref_mean = torch.mean(torch.stack([models[i](x_ref) for i in range(len(models))]), dim=-1).cpu().detach()
+    ref_var += torch.mean(torch.var(ref_mean, dim=0))
+ref_var = ref_var/(train_size//bs)
+
+threshold = ref_var.mean()
+
+adv_vecs_2 = 0
+adv_vecs_3 = 0
+adv_vecs_4 = 0
+adv_vecs_5 = 0
+adv_vecs_7 = 0
+adv_vecs_10 = 0
+adv_vecs_15 = 0
+adv_vecs_25 = 0
+adv_vecs_33 = 0
+adv_vecs_50 = 0
+adv_vecs_75 = 0
+adv_vecs_100 = 0
+
+for j in range(sweeps):
+    if j%(sweeps//3)==0:
+        print(f"Running sweep{j}")
+
+    # generate xs
+    x = torch.normal(mean=torch.zeros(size=(eval_size, n_dim)), std=torch.ones(size=(eval_size, n_dim)))
+    x = x / torch.sqrt(torch.sum(x**2, dim=-1, keepdim=True)) * test_r
+
+    means = torch.stack([models[i](x.to("cuda")) for i in range(len(models))])
+    means = torch.mean(means, dim=-1)
+    
+    ens_means_2 = means[0:2]
+    ens_means_3 = means[0:3]
+    ens_means_4 = means[0:4]
+    ens_means_5 = means[0:5]
+    ens_means_7 = means[0:7]
+    ens_means_10 = means[0:10]
+    ens_means_15 = means[0:15]
+    ens_means_25 = means[0:25]
+    ens_means_33 = means[0:33]
+    ens_means_50 = means[0:50]
+    ens_means_75 = means[0:75]
+    ens_means_100 = means[0:100]
+
+    ens_var_2 =   torch.var(ens_means_2, dim=0)
+    ens_var_3 =   torch.var(ens_means_3, dim=0)
+    ens_var_4 =   torch.var(ens_means_4, dim=0)
+    ens_var_5 =   torch.var(ens_means_5, dim=0)
+    ens_var_7 =   torch.var(ens_means_7, dim=0)
+    ens_var_10 =  torch.var(ens_means_10, dim=0)
+    ens_var_15 =  torch.var(ens_means_15, dim=0)
+    ens_var_25 =  torch.var(ens_means_25, dim=0)
+    ens_var_33 =  torch.var(ens_means_33, dim=0)
+    ens_var_50 =  torch.var(ens_means_50, dim=0)
+    ens_var_75 =  torch.var(ens_means_75, dim=0)
+    ens_var_100 = torch.var(ens_means_100, dim=0)
+
+    adv_vecs_2 += (ens_var_2<threshold).sum()
+    adv_vecs_3 += (ens_var_3<threshold).sum()
+    adv_vecs_4 += (ens_var_4<threshold).sum()
+    adv_vecs_5 += (ens_var_5<threshold).sum()
+    adv_vecs_7 += (ens_var_7<threshold).sum()
+    adv_vecs_10 += (ens_var_10<threshold).sum()
+    adv_vecs_15 += (ens_var_15<threshold).sum()
+    adv_vecs_25 += (ens_var_25<threshold).sum()
+    adv_vecs_33 += (ens_var_33<threshold).sum()
+    adv_vecs_50 += (ens_var_50<threshold).sum()
+    adv_vecs_75 += (ens_var_75<threshold).sum()
+    adv_vecs_100 += (ens_var_100<threshold).sum()
+
+print(f"Reference ens variance on training set ( {n_dim}-dimensional unit hypershell): {ref_var.mean()}")
+print(f"Out of {sweeps*eval_size} evaluation points on hypersphere with radius {test_r}:")
+print(f"2-sized ensemble predictions, with disagreement less than {threshold}:   {adv_vecs_2}")
+print(f"3-sized ensemble predictions, with disagreement less than {threshold}:   {adv_vecs_3}")
+print(f"4-sized ensemble predictions, with disagreement less than {threshold}:   {adv_vecs_4}")
+print(f"5-sized ensemble predictions, with disagreement less than {threshold}:   {adv_vecs_5}")
+print(f"7-sized ensemble predictions, with disagreement less than {threshold}:   {adv_vecs_7}")
+print(f"10-sized ensemble predictions, with disagreement less than {threshold}:  {adv_vecs_10}")
+print(f"15-sized ensemble predictions, with disagreement less than {threshold}:  {adv_vecs_15}")
+print(f"25-sized ensemble predictions, with disagreement less than {threshold}:  {adv_vecs_25}")
+print(f"33-sized ensemble predictions, with disagreement less than {threshold}:  {adv_vecs_33}")
+print(f"50-sized ensemble predictions, with disagreement less than {threshold}:  {adv_vecs_50}")
+print(f"75-sized ensemble predictions, with disagreement less than {threshold}:  {adv_vecs_75}")
+print(f"100-sized ensemble predictions, with disagreement less than {threshold}: {adv_vecs_100}")
