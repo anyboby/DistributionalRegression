@@ -11,7 +11,7 @@ def w_distance_quant_cat(
     # dim = c
     # (a,b,1,c,d) - (a,b,c,1,d) -> (a,b,c,c,d)
     pairwise_delta = th.abs(quant_dist.unsqueeze(cdf_dim-1)-cat_zs.unsqueeze(cdf_dim))
-    pairwise_delta = th.abs(dists.unsqueeze(ens_dim)-dists.unsqueeze(ens_dim+1))
+    
     if p==1:
         pairwise_delta = pairwise_delta
     elif p==2:
