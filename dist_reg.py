@@ -1,10 +1,11 @@
 import math
-from cProfile import label
 from random import randint
 
+import matplotlib as mpl
 import matplotlib.patches as mpatches
 import matplotlib.pyplot as plt
 import numpy as np
+import pandas as pd
 import tikzplotlib
 import torch as th
 import torch.nn as nn
@@ -13,18 +14,27 @@ from matplotlib import rcParams
 from numpy.random.mtrand import sample
 from scipy.misc import derivative
 from scipy.signal import savgol_filter
-
-# rcParams['text.usetex'] = True
-rcParams['mathtext.fontset'] = 'stix'
-rcParams['font.family'] = 'STIXGeneral'
-plt.rcParams.update({'font.size': 12})
-rcParams['path.simplify'] = True
-
-live_draw = True
+from torch import distributions as D
+from torch.autograd import Variable
+from torch.distributions.mixture_same_family import MixtureSameFamily
 
 device = 'cuda' if th.cuda.is_available() else 'cpu'
 th.cuda.device(0)
 print(f'Using {device} device')
+
+
+live_draw = False
+
+plt.rcParams.update({
+    "pgf.texsystem": "pdflatex",
+    "font.family": "serif",  # use serif/main font for text elements
+    "font.size" : 8,
+    # "font.family": "Times New Roman",  # use serif/main font for text elements
+    "text.usetex": True,     # use inline math for ticks
+    "pgf.rcfonts": False     # don't setup fonts from rc parameters
+    })
+
+figsize = (1.9, 2.5)
 
 colors = ['#2196F3', '#FF9800', '#4CAF50', '#F44336', '#9C27B0']
 darkcolors = ['#0b7ad1', '#cc7a00', '#458c3f', '#d82411', '#7c1e92']
@@ -165,18 +175,11 @@ class Net(nn.Module):
         self.activation = F.relu
 
     def forward(self, x, reparametrize = True):
-        if self.prior_net is not None:
-            prior_out = self.prior_net(x).detach()
-
         for l in range(len(self.layers)-1):
             x = self.layers[l](x)
             x = self.activation(x)
         
         x=self.layers[-1](x)
-
-        if self.prior_net is not None:
-            x = x+ self.prior_beta * prior_out
-
 
         if self.loss_type == "evidential":
             x = self.activation(x)
@@ -193,7 +196,7 @@ class Net(nn.Module):
                 x = mu, mu, counts
         return x
     
-    def forward_sample(self, x, size=1, include_latent = False, reparametrize=False, logits=False):
+    def forward_sample(self, x, size=1, include_latent = False, reparametrize=False):
         x = self.forward(x, reparametrize=reparametrize)
     
         if self.loss_type == "quantile" or self.loss_type == "implicit_quantile" or self.loss_type == "expectile":
@@ -361,7 +364,7 @@ class Net(nn.Module):
 
 ### TRAINING DATA ###
 ### more complex mixture samples
-train_size = 2000
+train_size = 250
 
 # generate xs
 # x_clusters = th.tensor([-6, 0.2, 7]).float()
@@ -373,7 +376,6 @@ mix = D.Categorical(th.ones_like(x_clusters))
 comp = D.Normal(x_clusters, x_stds)
 gmm = MixtureSameFamily(mix, comp)
 x_samples = gmm.sample(sample_shape=(train_size,1))
-
 
 # x_interval = [-3,3]
 # uni = D.Uniform(x_interval[0], x_interval[1])
@@ -445,15 +447,16 @@ if live_draw:
 
 ### PREDICTION / EVALUATION
 # create test values of x
-x_test = th.linspace(-8, 8, steps=1000)[...,None].float().cuda()
-sample_size = 500
+x_test = th.linspace(-8, 8, steps=500)[...,None].float().cuda()
+sample_size = 250
 old_y_pred_vars1 = np.squeeze(np.zeros_like(x_test.cpu().detach().numpy()))
 
 # draw samples from CDF by drawing from CDF^-1(u), u ~ U[0,1]
 x_samples = x_test.repeat((1,sample_size)).flatten().cpu().detach().numpy()
 
 # plot settings
-fig = plt.figure(figsize = (7, 9))
+# Neurips textwidth is 5.5
+fig = plt.figure(figsize = figsize)
 
 # training data plot
 samples_np = samples.cpu().detach().numpy()
@@ -463,43 +466,48 @@ x_test_np = x_test.cpu().detach().numpy()
 # ep_plt1 = plt.plot(x_test_np, np.zeros_like(x_test_np), color='orange')[0]
 # ep_plt2 = plt.plot(x_test_np, np.zeros_like(x_test_np), color='yellow')[0]
 
-postpred_sc = plt.scatter(x_samples, np.zeros_like(x_samples), color=colors[0], s=2.5, alpha=.04, label="Categorical")
-postpred_sc2 = plt.scatter(x_samples, np.zeros_like(x_samples), color=colors[1], s=2.5, alpha=.04, label="Quantile")
+postpred_sc = plt.scatter(x_samples, np.zeros_like(x_samples), color=colors[0], s=0.4, alpha=.15, label="Categorical", edgecolors="none")
+postpred_sc2 = plt.scatter(x_samples, np.zeros_like(x_samples), color=colors[1], s=0.4, alpha=.1, label="Quantile", edgecolors="none")
 # postpred_sc3 = plt.scatter(x_samples, np.zeros_like(x_samples), color='orange', s=1, alpha=.2, label="QR3")
 # postpred_sc4 = plt.scatter(x_samples, np.zeros_like(x_samples), color='red', s=1, alpha=.1, label="QR4")
 
-map_sc = plt.scatter(x_samples, np.zeros_like(x_samples), color=darkcolors[0], s=2.5, alpha=.2,)
-map_sc2 = plt.scatter(x_samples, np.zeros_like(x_samples), color=darkcolors[1], s=2.5, alpha=.2,)
+map_sc = plt.scatter(x_samples, np.zeros_like(x_samples), color=darkcolors[0], s=1, alpha=.2, edgecolors="none")
+map_sc2 = plt.scatter(x_samples, np.zeros_like(x_samples), color=darkcolors[1], s=1, alpha=.2, edgecolors="none")
 # map_sc3 = plt.scatter(x_samples, np.zeros_like(x_samples), color='orange', s=1, alpha=.2,)
 # map_sc4 = plt.scatter(x_samples, np.zeros_like(x_samples), color='red', s=1, alpha=.2,)
 
-sc = plt.scatter(samples_np[:,0], samples_np[:,1], s = 15, color = colors[2], alpha = 0.5, label='Data')
+sc = plt.scatter(samples_np[:,0], samples_np[:,1], s = 3, color = colors[2], alpha = 0.75, label='Training Data', edgecolors="none")
 
+sc.set_rasterized(True)
+postpred_sc.set_rasterized(True)
+postpred_sc2.set_rasterized(True)
+map_sc.set_rasterized(True)
+map_sc2.set_rasterized(True)
 
-y_lim = (-2,2)
+y_lim = (-2.5,2.5)
 plt.xlim([-8, 8])
 plt.ylim(y_lim)
 
 
 legend_list = [(mpatches.Patch(color=c), a) for c,a in zip(colors[0:2], ["Categorical", "Quantile"])]
-plt.legend(*zip(*legend_list), loc='lower right', prop={'size': 18})
+plt.legend(*zip(*legend_list), loc='lower right') #, prop={'size': 18})
 
-plt.title("Toy 1D-Regression")
-plt.xlabel(" X ")
+# plt.title("Toy 1D-Regression")
+plt.xlabel("     ")
 
 # plt.legend(loc=2, prop={'size': 12, alpha=1})
 if live_draw:
     plt.show()
 
-def eval_and_plot_net(models, mapscatter, postpredscatter, flush=True, scale=1):
+def eval_and_plot_net(models, mapscatter, postpredscatter, flush=True):
 
     y_pred_maps, y_pred_postpreds, quant_vars = [], [], []
     max_count = 0
 
     for i in range(len(models)):
         cur_model = models[i]
-        y_pred_map = cur_model.forward_sample(x_test, size=sample_size, reparametrize=False, logits=False)
-        y_pred_postpred = cur_model.forward_sample(x_test, size=sample_size, reparametrize=True, logits=False)
+        y_pred_map = cur_model.forward_sample(x_test, size=sample_size, reparametrize=False)
+        y_pred_postpred = cur_model.forward_sample(x_test, size=sample_size, reparametrize=True)
 
         y_pred_maps.append(y_pred_map.flatten().cpu().detach().numpy())
         y_pred_postpreds.append(y_pred_postpred.flatten().cpu().detach().numpy())
@@ -532,12 +540,11 @@ def eval_and_plot_net(models, mapscatter, postpredscatter, flush=True, scale=1):
 
     # update prediction plots    
     # ep_plt.set_ydata(quant_var_pl)
-    mapscatter.set_offsets(np.stack((x_samples,scale*y_pred_map_pl), axis=-1))
-    postpredscatter.set_offsets(np.stack((x_samples,scale*y_pred_postpred_pl), axis=-1))
+    mapscatter.set_offsets(np.stack((x_samples,y_pred_map_pl), axis=-1))
+    postpredscatter.set_offsets(np.stack((x_samples,y_pred_postpred_pl), axis=-1))
     
     if live_draw:
         fig.canvas.draw()
-    
     if flush:
         fig.canvas.flush_events()
 
@@ -547,14 +554,14 @@ def eval_and_plot_net(models, mapscatter, postpredscatter, flush=True, scale=1):
 ### MODEL
 th.manual_seed(1)
 
-n_outs = 201
+n_outs = 101
 models = []
 models2 = []
 models3 = []
 models4 = []
 ensemble_size = 1
 for i in range(ensemble_size):
-    net = Net(n_in=1, n_outs= n_outs, n_hidden=128, n_layers=1, lr=5e-4, weight_decay=7e-4, loss_type="categorical", last_layer_rbf=False, v_min=-1.5, v_max=1.5).cuda()
+    net = Net(n_in=1, n_outs= n_outs, n_hidden=128, n_layers=1, lr=5e-4, weight_decay=1e-4, loss_type="categorical", last_layer_rbf=False, v_min=-1.5, v_max=1.5).cuda()
     # net.apply(init_weights_xav)
     models.append(net)
 
@@ -597,7 +604,7 @@ for i in range(ensemble_size):
 
 
 bs = 128
-epochs = 1000
+epochs = 2000
 
 for i in range(epochs):
     losses = []
@@ -633,13 +640,18 @@ for i in range(epochs):
         #print('Epoch %4d, Train loss projection = %6.3f, loss quantile = %6.3f, loss evidential = %6.3f' % \
         #    (i, proj_loss.cpu().data.numpy(), qreg_loss.cpu().data.numpy(), evid_loss.cpu().data.numpy())
         #    )
+
+fig.canvas.draw()
 ax_list = fig.get_axes()
 ax_list[0].set_facecolor('#F0F0F0')
 ax_list[0].grid(color='white')
 
-# save the plot to a PDF file
-# plt.savefig('myplot.pdf', bbox_inches='tight')
 
-# plt.savefig(f'quant_reg.pdf', bbox_inches = 'tight')
-# # plt.savefig(f'quant_reg_{loss_type}.eps', bbox_inches = 'tight', format="eps")
-plt.savefig(f'toy_regression.png', dpi=300, bbox_inches='tight')
+    # "font.family": "serif",
+    # # Use LaTeX default serif font.
+    # "font.serif": [],
+    # # Use specific cursive fonts.
+    # "font.cursive": ["Comic Neue", "Comic Sans MS"],
+
+plt.savefig('images/toy_regression.pgf', dpi=900)
+plt.savefig('images/toy_regression.png', dpi=900)
