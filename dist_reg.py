@@ -28,13 +28,13 @@ live_draw = False
 plt.rcParams.update({
     "pgf.texsystem": "pdflatex",
     "font.family": "serif",  # use serif/main font for text elements
-    "font.size" : 8,
+    "font.size" : 6,
     # "font.family": "Times New Roman",  # use serif/main font for text elements
     "text.usetex": True,     # use inline math for ticks
     "pgf.rcfonts": False     # don't setup fonts from rc parameters
     })
 
-figsize = (1.9, 2.5)
+figsize = (2.0, 2.2)
 
 colors = ['#2196F3', '#FF9800', '#4CAF50', '#F44336', '#9C27B0']
 darkcolors = ['#0b7ad1', '#cc7a00', '#458c3f', '#d82411', '#7c1e92']
@@ -476,7 +476,7 @@ map_sc2 = plt.scatter(x_samples, np.zeros_like(x_samples), color=darkcolors[1], 
 # map_sc3 = plt.scatter(x_samples, np.zeros_like(x_samples), color='orange', s=1, alpha=.2,)
 # map_sc4 = plt.scatter(x_samples, np.zeros_like(x_samples), color='red', s=1, alpha=.2,)
 
-sc = plt.scatter(samples_np[:,0], samples_np[:,1], s = 3, color = colors[2], alpha = 0.75, label='Training Data', edgecolors="none")
+sc = plt.scatter(samples_np[:,0], samples_np[:,1], s = 3, color = colors[4], alpha = 0.75, label='Training Data', edgecolors=darkcolors[4])
 
 sc.set_rasterized(True)
 postpred_sc.set_rasterized(True)
@@ -561,7 +561,7 @@ models3 = []
 models4 = []
 ensemble_size = 1
 for i in range(ensemble_size):
-    net = Net(n_in=1, n_outs= n_outs, n_hidden=128, n_layers=1, lr=5e-4, weight_decay=1e-4, loss_type="categorical", last_layer_rbf=False, v_min=-1.5, v_max=1.5).cuda()
+    net = Net(n_in=1, n_outs= n_outs, n_hidden=128, n_layers=1, lr=5e-4, weight_decay=5e-3, loss_type="categorical", last_layer_rbf=False, v_min=-1.5, v_max=1.5).cuda()
     # net.apply(init_weights_xav)
     models.append(net)
 
@@ -653,5 +653,6 @@ ax_list[0].grid(color='white')
     # # Use specific cursive fonts.
     # "font.cursive": ["Comic Neue", "Comic Sans MS"],
 
+plt.tight_layout()
 plt.savefig('images/toy_regression.pgf', dpi=900)
 plt.savefig('images/toy_regression.png', dpi=900)
