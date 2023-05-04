@@ -1,6 +1,6 @@
 import math
 from random import randint
-
+from typing import List
 import matplotlib as mpl
 import matplotlib.patches as mpatches
 import matplotlib.pyplot as plt
@@ -17,6 +17,8 @@ from scipy.signal import savgol_filter
 from torch import distributions as D
 from torch.autograd import Variable
 from torch.distributions.mixture_same_family import MixtureSameFamily
+from scipy.interpolate import make_interp_spline, BSpline
+import scipy.signal
 
 device = 'cuda' if th.cuda.is_available() else 'cpu'
 th.cuda.device(0)
@@ -196,7 +198,7 @@ class Net(nn.Module):
                 x = mu, mu, counts
         return x
     
-    def forward_sample(self, x, size=1, include_latent = False, reparametrize=False):
+    def forward_sample(self, x, size=1, include_latent = False, reparametrize=False, sample_analytical = False):
         x = self.forward(x, reparametrize=reparametrize)
     
         if self.loss_type == "quantile" or self.loss_type == "implicit_quantile" or self.loss_type == "expectile":
@@ -204,24 +206,47 @@ class Net(nn.Module):
             x_idx = th.arange(0, len(x))[...,None]
             if reparametrize:
                 samples = x[x_idx, quant_idx]
+                if sample_analytical:
+                    tau = (th.arange(size)/size+1/(2*size)).to(x.device)
+                    samples = th.quantile(x, tau, dim=1).swapaxes(0,1)
             else:
-                samples = x.mean(dim=-1, keepdim=True).expand((quant_idx.shape))
+                samples = x.mean(dim=-1, keepdim=True)#.expand((quant_idx.shape))
 
         elif self.loss_type == "categorical":
             probs = self.softmax(x, t=self.sm_temp)
-            dists = D.categorical.Categorical(probs)
-            idx_samples = dists.sample((size,)).swapaxes(0,1)
 
-            # unif_samples = self.unif.sample((x.shape[0],size))
+            if reparametrize:                
+                if sample_analytical:                    
+                    tau = (th.arange(size)/size+1/(2*size)).to(x.device)
+                    cdf = th.cumsum(probs, dim=1)
 
-            samples = self.v_min + self.delta_z * idx_samples #+ unif_samples
+                    tau_expanded = tau.unsqueeze(0).repeat(cdf.shape[0],1)
+                    zs_exp = self.zs.unsqueeze(0).repeat(cdf.shape[0],1)
+                    
+                    pairw_delta = (cdf.unsqueeze(1)-tau_expanded.unsqueeze(2))
+                    pairw_delta_pos = pairw_delta.clone()
+                    pairw_delta_neg = pairw_delta.clone()
+                    pairw_delta_pos[pairw_delta_pos<0] = 1e9
+                    pairw_delta_neg[pairw_delta_neg>0] = -1e9
 
-            if reparametrize:
-                samples = samples
+                    lev_u, ind_u = pairw_delta_pos.min(dim=2)
+                    lev_l, ind_l = pairw_delta_neg.max(dim=2)
+                    lev_l = th.abs(lev_l)
+
+                    lev_u_norm = lev_u/(lev_l + lev_u)
+                    lev_l_norm = lev_l/(lev_l + lev_u)
+                    
+                    z_l = th.gather(zs_exp, index=ind_l, dim=1)
+                    z_u = th.gather(zs_exp, index=ind_u, dim=1)
+
+                    z = lev_u_norm * z_l + lev_l_norm * z_u
+                    
+                    samples = z
+
             else:
                 # samples
                 samples = th.sum(probs * self.zs.expand(probs.shape), dim=-1, keepdim=True)
-                samples = samples.expand((samples.shape[0], size))
+                # samples = samples.expand((samples.shape[0], size))
 
         elif self.loss_type == "binary":
             probs = self.sigmoid(x, t=self.sm_temp)
@@ -250,6 +275,20 @@ class Net(nn.Module):
             samples = x.repeat((1, size))
 
         return samples
+
+    def forward_std(self, x, reparametrize):
+        x = self.forward(x, reparametrize=reparametrize)
+    
+        if self.loss_type == "quantile" or self.loss_type == "implicit_quantile" or self.loss_type == "expectile":
+            std = th.std(x, dim=1)
+        elif self.loss_type == "categorical":
+            probs = self.softmax(x, t=self.sm_temp)
+            mean = th.sum(probs * self.zs.expand(probs.shape), dim=-1, keepdim=True)
+            var = th.sum(probs * (self.zs.expand(probs.shape) - mean)**2, dim=1)
+            std = th.sqrt(var)
+        
+        return std
+
 
     def fit(self, x, y):
         x, y = to_variable(var=(x,y), cuda=True)
@@ -362,15 +401,25 @@ class Net(nn.Module):
         # mu = mu * (1+th.randn_like(std))
         return mu + eps * std_pseudo
 
+def smooth(scalars: List[float], weight: float) -> List[float]:  # Weight between 0 and 1
+    last = scalars[0]  # First value in the plot (first timestep)
+    smoothed = list()
+    for point in scalars:
+        smoothed_val = last * weight + (1 - weight) * point  # Calculate smoothed value
+        smoothed.append(smoothed_val)                        # Save it
+        last = smoothed_val                                  # Anchor the last smoothed value
+        
+    return smoothed
+
 ### TRAINING DATA ###
 ### more complex mixture samples
-train_size = 250
+train_size = 100
 
 # generate xs
 # x_clusters = th.tensor([-6, 0.2, 7]).float()
 x_clusters = th.tensor([-2, 2]).float()
 # x_stds = th.tensor([0.5,0.5, 0.5]).float()
-x_stds = th.tensor([.5, .5]).float()
+x_stds = th.tensor([.6, .6]).float()
 
 mix = D.Categorical(th.ones_like(x_clusters))
 comp = D.Normal(x_clusters, x_stds)
@@ -415,10 +464,10 @@ def f_sig_2(x, scale=1e-1):                     ## add a high noise cluster for 
 
 ## define mixture components. Stds in x-direct are kept small. 
 # mu_x1 = f_mu_1(x_samples, scale=0.6)
-mu_x1 = f_sin_1(x_samples, scale=0.8)
+mu_x1 = 0.7 * f_sin_1(x_samples, scale=0.8)
 mu_x1 = th.cat((x_samples, mu_x1), dim = -1)
 # sig_x1 = f_sig_1(x_samples, scale=0.2e-1)
-sig_x1 = f_const_1(x_samples, scale=0.2)
+sig_x1 = f_const_1(x_samples, scale=0.15)
 # sig_x1 = th.cat((1e-5 * th.ones_like(x_samples), sig_x1), dim = -1)
 sig_x1 = th.cat((sig_x1, sig_x1), dim = -1)
 
@@ -447,8 +496,8 @@ if live_draw:
 
 ### PREDICTION / EVALUATION
 # create test values of x
-x_test = th.linspace(-8, 8, steps=500)[...,None].float().cuda()
-sample_size = 250
+x_test = th.linspace(-15, 15, steps=500)[...,None].float().cuda()
+sample_size = 51
 old_y_pred_vars1 = np.squeeze(np.zeros_like(x_test.cpu().detach().numpy()))
 
 # draw samples from CDF by drawing from CDF^-1(u), u ~ U[0,1]
@@ -466,28 +515,28 @@ x_test_np = x_test.cpu().detach().numpy()
 # ep_plt1 = plt.plot(x_test_np, np.zeros_like(x_test_np), color='orange')[0]
 # ep_plt2 = plt.plot(x_test_np, np.zeros_like(x_test_np), color='yellow')[0]
 
-postpred_sc = plt.scatter(x_samples, np.zeros_like(x_samples), color=colors[0], s=0.4, alpha=.15, label="Categorical", edgecolors="none")
-postpred_sc2 = plt.scatter(x_samples, np.zeros_like(x_samples), color=colors[1], s=0.4, alpha=.1, label="Quantile", edgecolors="none")
+# postpred_sc = plt.scatter(x_samples, np.zeros_like(x_samples), color=colors[0], s=0.5, alpha=1, label="Categorical", edgecolors="none")
+# postpred_sc2 = plt.scatter(x_samples, np.zeros_like(x_samples), color=colors[1], s=0.5, alpha=1, label="Quantile", edgecolors="none")
 # postpred_sc3 = plt.scatter(x_samples, np.zeros_like(x_samples), color='orange', s=1, alpha=.2, label="QR3")
 # postpred_sc4 = plt.scatter(x_samples, np.zeros_like(x_samples), color='red', s=1, alpha=.1, label="QR4")
 
-map_sc = plt.scatter(x_samples, np.zeros_like(x_samples), color=darkcolors[0], s=1, alpha=.2, edgecolors="none")
-map_sc2 = plt.scatter(x_samples, np.zeros_like(x_samples), color=darkcolors[1], s=1, alpha=.2, edgecolors="none")
+# map_sc = plt.scatter(x_samples, np.zeros_like(x_samples), color=darkcolors[0], s=1, alpha=.002, edgecolors="none")
+# map_sc2 = plt.scatter(x_samples, np.zeros_like(x_samples), color=darkcolors[1], s=1, alpha=.002, edgecolors="none")
+
 # map_sc3 = plt.scatter(x_samples, np.zeros_like(x_samples), color='orange', s=1, alpha=.2,)
 # map_sc4 = plt.scatter(x_samples, np.zeros_like(x_samples), color='red', s=1, alpha=.2,)
 
-sc = plt.scatter(samples_np[:,0], samples_np[:,1], s = 3, color = colors[4], alpha = 0.75, label='Training Data', edgecolors=darkcolors[4])
+# sc = plt.scatter(samples_np[:,0], samples_np[:,1], s = 1.5, color = "black", alpha = 1, label='Training Data', edgecolors="black")
 
-sc.set_rasterized(True)
-postpred_sc.set_rasterized(True)
-postpred_sc2.set_rasterized(True)
-map_sc.set_rasterized(True)
-map_sc2.set_rasterized(True)
+# sc.set_rasterized(True)
+# postpred_sc.set_rasterized(True)
+# postpred_sc2.set_rasterized(True)
+# map_sc.set_rasterized(True)
+# map_sc2.set_rasterized(True)
 
-y_lim = (-2.5,2.5)
-plt.xlim([-8, 8])
+y_lim = (-1.5,1.5)
+plt.xlim([-10, 10])
 plt.ylim(y_lim)
-
 
 legend_list = [(mpatches.Patch(color=c), a) for c,a in zip(colors[0:2], ["Categorical", "Quantile"])]
 plt.legend(*zip(*legend_list), loc='lower right') #, prop={'size': 18})
@@ -501,16 +550,17 @@ if live_draw:
 
 def eval_and_plot_net(models, mapscatter, postpredscatter, flush=True):
 
-    y_pred_maps, y_pred_postpreds, quant_vars = [], [], []
+    y_pred_maps, y_stds, y_pred_postpreds, quant_vars = [], [], [], []
     max_count = 0
 
     for i in range(len(models)):
         cur_model = models[i]
-        y_pred_map = cur_model.forward_sample(x_test, size=sample_size, reparametrize=False)
-        y_pred_postpred = cur_model.forward_sample(x_test, size=sample_size, reparametrize=True)
-
-        y_pred_maps.append(y_pred_map.flatten().cpu().detach().numpy())
-        y_pred_postpreds.append(y_pred_postpred.flatten().cpu().detach().numpy())
+        y_pred_map = cur_model.forward_sample(x_test, size=sample_size, reparametrize=False, sample_analytical=False)
+        y_pred_postpred = cur_model.forward_sample(x_test, size=sample_size, reparametrize=True, sample_analytical=True)
+        y_std = cur_model.forward_std(x_test, reparametrize=False)
+        y_stds.append(y_std.cpu().detach().numpy())
+        y_pred_maps.append(y_pred_map.cpu().detach().numpy())
+        y_pred_postpreds.append(y_pred_postpred.cpu().detach().numpy())
 
         # epistemic uncertainty
         if models[0].loss_type == "evidential":
@@ -533,23 +583,23 @@ def eval_and_plot_net(models, mapscatter, postpredscatter, flush=True):
     # fit to plot size
     quant_var_pl = quant_var_pl #/ 3 * np.median(quant_var_pl) * y_lim[-1]
 
-    y_pred_map_pl = np.mean(y_pred_maps, axis=0 )
+    y_pred_map_pl = np.mean(y_pred_maps, axis=0)
     y_pred_postpred_pl = y_pred_postpreds[randint(0,len(models)-1)]
+    y_std = y_stds[randint(0,len(models)-1)]
 
     print(f"max count :{max_count}")
 
     # update prediction plots    
     # ep_plt.set_ydata(quant_var_pl)
-    mapscatter.set_offsets(np.stack((x_samples,y_pred_map_pl), axis=-1))
-    postpredscatter.set_offsets(np.stack((x_samples,y_pred_postpred_pl), axis=-1))
+    # mapscatter.set_offsets(np.stack((x_samples,y_pred_map_pl), axis=-1))
+    # postpredscatter.set_offsets(np.stack((x_samples,y_pred_postpred_pl), axis=-1))
     
     if live_draw:
         fig.canvas.draw()
     if flush:
         fig.canvas.flush_events()
 
-    return qaunt_var_this_step
-
+    return x_samples, y_pred_map_pl, y_std, y_pred_postpred_pl
 
 ### MODEL
 th.manual_seed(1)
@@ -567,44 +617,12 @@ for i in range(ensemble_size):
 
 ensemble_size = 1
 for i in range(ensemble_size):
-    net = Net(n_in=1, n_outs= n_outs, n_hidden=128, n_layers=1, lr=5e-4, weight_decay=1e-5, loss_type="quantile", last_layer_rbf=False).cuda()
+    net = Net(n_in=1, n_outs= n_outs, n_hidden=128, n_layers=1, lr=5e-4, weight_decay=1e-4, loss_type="quantile", last_layer_rbf=False).cuda()
     # net.apply(init_weights_xav)
     models2.append(net)
 
-# ensemble_size = 1
-# for i in range(ensemble_size):
-#     net = Net(n_in=1, n_outs= n_outs, n_hidden=128, n_layers=2, lr=1e-4, weight_decay=1e-10, loss_type="quantile", last_layer_rbf=False).cuda()
-#     # net.apply(init_weights_xav)
-#     models3.append(net)
-
-# ensemble_size = 1
-# for i in range(ensemble_size):
-#     net = Net(n_in=1, n_outs= n_outs, n_hidden=128, n_layers=2, lr=1e-4, weight_decay=1e-10, loss_type="quantile", last_layer_rbf=False).cuda()
-#     # net.apply(init_weights_xav)
-#     models4.append(net)
-
-
-# ensemble_size2 = 1
-# for i in range(ensemble_size2):
-#     net = Net(n_in=1, n_outs= n_outs, n_hidden=256, n_layers=1, lr=5e-5, weight_decay=1e-10, loss_type="implicit_quantile", last_layer_rbf=False).cuda()
-#     # net.apply(init_weights_xav)
-#     models2.append(net)
-
-# ensemble_size3 = 1
-# for i in range(ensemble_size):
-#     net = Net(n_in=1, n_outs= n_outs, n_hidden=256, n_layers=1, lr=5e-5, weight_decay=1e-10, loss_type="categorical", last_layer_rbf=False, v_min=-2, v_max=2, temp=5).cuda()
-#     # net.apply(init_weights_xav)
-#     models3.append(net)
-
-# ensemble_size4 = 1
-# for i in range(ensemble_size2):
-#     net = Net(n_in=1, n_outs= n_outs, n_hidden=256, n_layers=1, lr=5e-5, weight_decay=1e-10, loss_type="binary", last_layer_rbf=False, v_min=-2, v_max=2, temp=5).cuda()
-#     # net.apply(init_weights_xav)s
-#     models4.append(net)
-
-
 bs = 128
-epochs = 2000
+epochs = 20000
 
 for i in range(epochs):
     losses = []
@@ -633,19 +651,49 @@ for i in range(epochs):
     if i % 50 == 0 or i==epochs-1:
         flush = i<epochs-1
         print(i, [l.cpu().data.numpy() for l in losses])
-        eval_and_plot_net(models, map_sc, postpred_sc, flush = flush)
-        eval_and_plot_net(models2, map_sc2, postpred_sc2, flush = flush)
-        # eval_and_plot_net(models3, map_sc3, postpred_sc3, flush = flush) 
+        x, y_mean1, y_std1,  y_samples1 = eval_and_plot_net(models, None, None, flush = flush)
+        x, y_mean2, y_std2, y_samples2 = eval_and_plot_net(models2, None, None, flush = flush)
+        # eval_and_plot_nets(models3, map_sc3, postpred_sc3, flush = flush) 
         # eval_and_plot_net(models4, map_sc4, postpred_sc4, flush = flush)
         #print('Epoch %4d, Train loss projection = %6.3f, loss quantile = %6.3f, loss evidential = %6.3f' % \
         #    (i, proj_loss.cpu().data.numpy(), qreg_loss.cpu().data.numpy(), evid_loss.cpu().data.numpy())
         #    )
 
+x_test_np = x_test.cpu().detach().numpy().copy().squeeze()
+for i in range(y_samples1.shape[-1]):
+    # 300 represents number of points to make between T.min and T.max
+    
+    y1 = y_samples1[:,i].squeeze()
+    y2 = y_samples2[:,i].squeeze()
+
+    smoothed1 = smooth(y1, weight=0.8)
+    smoothed2 = smooth(y2, weight=0.8)
+
+    b, a = scipy.signal.butter(3, 0.1)
+
+    smoothed13 = scipy.signal.medfilt(y1, kernel_size=5)
+    smoothed23 = scipy.signal.medfilt(y2, kernel_size=5)
+
+    smoothed12 = scipy.signal.filtfilt(b, a, y1)
+    smoothed22 = scipy.signal.filtfilt(b, a, y2)
+
+    plt.plot(x_test_np, y1, color=colors[0], linewidth=0.3, alpha=1)
+    # plt.plot(x_test_np, y2, color=colors[1], linewidth=0.3, alpha=1)
+
+plt.plot(x_test_np, y_mean1, color=darkcolors[0], linewidth=0.5, alpha=1)
+plt.plot(x_test_np, y_mean2, color=darkcolors[1], linewidth=0.5, alpha=1)
+
+plt.fill_between(x_test_np, y_mean1.squeeze()-y_std1, y_mean1.squeeze()+y_std2, alpha=0.2)
+plt.fill_between(x_test_np, y_mean2.squeeze()-y_std2, y_mean2.squeeze()+y_std2, alpha=0.2)
+
 fig.canvas.draw()
 ax_list = fig.get_axes()
 ax_list[0].set_facecolor('#F0F0F0')
 ax_list[0].grid(color='white')
+sc = plt.scatter(samples_np[:,0], samples_np[:,1], s = 1.5, color = "black", alpha = 1, label='Training Data', edgecolors="black")
 
+# save data
+np.savez('toyregression.npz', x_test_np, samples_np, y_mean1, y_samples1, y_mean2, y_samples2)
 
     # "font.family": "serif",
     # # Use LaTeX default serif font.
