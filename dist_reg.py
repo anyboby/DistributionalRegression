@@ -36,7 +36,7 @@ plt.rcParams.update({
     "pgf.rcfonts": False     # don't setup fonts from rc parameters
     })
 
-figsize = (2.0, 2.2)
+figsize = (2.8, 2.2)
 
 colors = ['#2196F3', '#FF9800', '#4CAF50', '#F44336', '#9C27B0']
 darkcolors = ['#0b7ad1', '#cc7a00', '#458c3f', '#d82411', '#7c1e92']
@@ -174,7 +174,7 @@ class Net(nn.Module):
             self.zs
         self.optimizer = th.optim.Adam(self.parameters(), lr=lr, weight_decay=weight_decay)
         # self.activation = F.relu
-        self.activation = F.relu
+        self.activation = F.elu
 
     def forward(self, x, reparametrize = True):
         for l in range(len(self.layers)-1):
@@ -226,8 +226,8 @@ class Net(nn.Module):
                     pairw_delta = (cdf.unsqueeze(1)-tau_expanded.unsqueeze(2))
                     pairw_delta_pos = pairw_delta.clone()
                     pairw_delta_neg = pairw_delta.clone()
-                    pairw_delta_pos[pairw_delta_pos<0] = 1e9
-                    pairw_delta_neg[pairw_delta_neg>0] = -1e9
+                    pairw_delta_pos[pairw_delta_pos<0] = 1e16
+                    pairw_delta_neg[pairw_delta_neg>0] = -1e16
 
                     lev_u, ind_u = pairw_delta_pos.min(dim=2)
                     lev_l, ind_l = pairw_delta_neg.max(dim=2)
@@ -413,13 +413,13 @@ def smooth(scalars: List[float], weight: float) -> List[float]:  # Weight betwee
 
 ### TRAINING DATA ###
 ### more complex mixture samples
-train_size = 100
+train_size = 75
 
 # generate xs
 # x_clusters = th.tensor([-6, 0.2, 7]).float()
-x_clusters = th.tensor([-2, 2]).float()
+x_clusters = th.tensor([-0.5, 0.5]).float()
 # x_stds = th.tensor([0.5,0.5, 0.5]).float()
-x_stds = th.tensor([.6, .6]).float()
+x_stds = th.tensor([.16, .16]).float()
 
 mix = D.Categorical(th.ones_like(x_clusters))
 comp = D.Normal(x_clusters, x_stds)
@@ -464,10 +464,10 @@ def f_sig_2(x, scale=1e-1):                     ## add a high noise cluster for 
 
 ## define mixture components. Stds in x-direct are kept small. 
 # mu_x1 = f_mu_1(x_samples, scale=0.6)
-mu_x1 = 0.7 * f_sin_1(x_samples, scale=0.8)
+mu_x1 = 0.1 * f_sin_1(x_samples, scale=3.3)
 mu_x1 = th.cat((x_samples, mu_x1), dim = -1)
 # sig_x1 = f_sig_1(x_samples, scale=0.2e-1)
-sig_x1 = f_const_1(x_samples, scale=0.15)
+sig_x1 = f_const_1(x_samples, scale=0.017)
 # sig_x1 = th.cat((1e-5 * th.ones_like(x_samples), sig_x1), dim = -1)
 sig_x1 = th.cat((sig_x1, sig_x1), dim = -1)
 
@@ -496,8 +496,8 @@ if live_draw:
 
 ### PREDICTION / EVALUATION
 # create test values of x
-x_test = th.linspace(-15, 15, steps=500)[...,None].float().cuda()
-sample_size = 51
+x_test = th.linspace(-2, 2, steps=500)[...,None].float().cuda()
+sample_size = 9
 old_y_pred_vars1 = np.squeeze(np.zeros_like(x_test.cpu().detach().numpy()))
 
 # draw samples from CDF by drawing from CDF^-1(u), u ~ U[0,1]
@@ -506,6 +506,8 @@ x_samples = x_test.repeat((1,sample_size)).flatten().cpu().detach().numpy()
 # plot settings
 # Neurips textwidth is 5.5
 fig = plt.figure(figsize = figsize)
+gs = fig.add_gridspec(1, 2, hspace=0, wspace=0)
+(ax1, ax2) = gs.subplots(sharey='row')
 
 # training data plot
 samples_np = samples.cpu().detach().numpy()
@@ -534,9 +536,12 @@ x_test_np = x_test.cpu().detach().numpy()
 # map_sc.set_rasterized(True)
 # map_sc2.set_rasterized(True)
 
-y_lim = (-1.5,1.5)
-plt.xlim([-10, 10])
-plt.ylim(y_lim)
+y_lim = (-0.18,0.18)
+x_lim = (-1.7, 1.7)
+ax1.set_xlim(x_lim)
+ax2.set_xlim(x_lim)
+ax1.set_ylim(y_lim)
+ax2.set_ylim(y_lim)
 
 legend_list = [(mpatches.Patch(color=c), a) for c,a in zip(colors[0:2], ["Categorical", "Quantile"])]
 plt.legend(*zip(*legend_list), loc='lower right') #, prop={'size': 18})
@@ -604,25 +609,25 @@ def eval_and_plot_net(models, mapscatter, postpredscatter, flush=True):
 ### MODEL
 th.manual_seed(1)
 
-n_outs = 101
+n_outs = 51
 models = []
 models2 = []
 models3 = []
 models4 = []
 ensemble_size = 1
 for i in range(ensemble_size):
-    net = Net(n_in=1, n_outs= n_outs, n_hidden=128, n_layers=1, lr=5e-4, weight_decay=5e-3, loss_type="categorical", last_layer_rbf=False, v_min=-1.5, v_max=1.5).cuda()
-    # net.apply(init_weights_xav)
+    net = Net(n_in=1, n_outs= n_outs, n_hidden=128, n_layers=1, lr=5e-4, weight_decay=3e-4, loss_type="categorical", last_layer_rbf=False, v_min=-0.2, v_max=0.2, temp=10).cuda()
+    net.apply(init_weights_xav)
     models.append(net)
 
 ensemble_size = 1
 for i in range(ensemble_size):
     net = Net(n_in=1, n_outs= n_outs, n_hidden=128, n_layers=1, lr=5e-4, weight_decay=1e-4, loss_type="quantile", last_layer_rbf=False).cuda()
-    # net.apply(init_weights_xav)
+    net.apply(init_weights_xav)
     models2.append(net)
 
 bs = 128
-epochs = 20000
+epochs = 10000
 
 for i in range(epochs):
     losses = []
@@ -677,23 +682,24 @@ for i in range(y_samples1.shape[-1]):
     smoothed12 = scipy.signal.filtfilt(b, a, y1)
     smoothed22 = scipy.signal.filtfilt(b, a, y2)
 
-    plt.plot(x_test_np, y1, color=colors[0], linewidth=0.3, alpha=1)
-    # plt.plot(x_test_np, y2, color=colors[1], linewidth=0.3, alpha=1)
+    ax1.plot(x_test_np, y1, color=colors[0], linewidth=0.5, alpha=1, zorder=1)
+    ax2.plot(x_test_np, y2, color=colors[1], linewidth=0.5, alpha=1, zorder=1)
 
-plt.plot(x_test_np, y_mean1, color=darkcolors[0], linewidth=0.5, alpha=1)
-plt.plot(x_test_np, y_mean2, color=darkcolors[1], linewidth=0.5, alpha=1)
+ax1.plot(x_test_np, y_mean1, color=darkcolors[0], linewidth=0.5, alpha=1)
+ax2.plot(x_test_np, y_mean2, color=darkcolors[1], linewidth=0.5, alpha=1)
 
-plt.fill_between(x_test_np, y_mean1.squeeze()-y_std1, y_mean1.squeeze()+y_std2, alpha=0.2)
-plt.fill_between(x_test_np, y_mean2.squeeze()-y_std2, y_mean2.squeeze()+y_std2, alpha=0.2)
+ax1.fill_between(x_test_np, y_mean1.squeeze()-y_std1, y_mean1.squeeze()+y_std2, alpha=0.2)
+ax2.fill_between(x_test_np, y_mean2.squeeze()-y_std2, y_mean2.squeeze()+y_std2, alpha=0.2)
 
 fig.canvas.draw()
 ax_list = fig.get_axes()
 ax_list[0].set_facecolor('#F0F0F0')
-ax_list[0].grid(color='white')
-sc = plt.scatter(samples_np[:,0], samples_np[:,1], s = 1.5, color = "black", alpha = 1, label='Training Data', edgecolors="black")
+# ax_list[0].grid(color='white')
+sc = ax1.scatter(samples_np[:,0], samples_np[:,1], s = 3.5, color = "black", alpha = 1, label='Training Data', edgecolors="black", zorder=2)
+sc = ax2.scatter(samples_np[:,0], samples_np[:,1], s = 3.5, color = "black", alpha = 1, label='Training Data', edgecolors="black", zorder=2)
 
 # save data
-np.savez('toyregression.npz', x_test_np, samples_np, y_mean1, y_samples1, y_mean2, y_samples2)
+np.savez('toyregression.npz', x_test_np, samples_np, y_mean1.squeeze(), y_std1, y_samples1, y_mean2.squeeze(), y_std2, y_samples2)
 
     # "font.family": "serif",
     # # Use LaTeX default serif font.
